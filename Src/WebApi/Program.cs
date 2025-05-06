@@ -1,41 +1,147 @@
+using System.Text.Json;
+using ByBitApi.Interface;
+using ByBitApi.Models;
+using ByBitApi.Service;
+using Core;
+using Infrastructure.Context;
+using Infrastructure.Interface;
+using Infrastructure.Repository;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.ResponseCompression;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
+using Swashbuckle.AspNetCore.SwaggerUI;
+using WebApi.Hubs;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+builder.Services.AddDbContext<BitSignalContext>((p, c) =>
+{
+    c.UseSqlServer(builder.Configuration.GetConnectionString("default"), o => { o.EnableRetryOnFailure(); });
+    c.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
+});
+
+builder.Services.AddResponseCompression(options =>
+{
+    options.Providers.Add<GzipCompressionProvider>();
+    options.EnableForHttps = true;
+});
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.RequireHttpsMetadata = false;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = Constant.Issuer,
+
+            ValidateAudience = true,
+            ValidAudience = Constant.Audience,
+            ValidateLifetime = true,
+
+            IssuerSigningKey = new SymmetricSecurityKey(Constant.JwtSecret),
+            ValidateIssuerSigningKey = true
+        };
+
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/cost"))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Bit Signal Api", Version = "1.0.0" });
+
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        In = ParameterLocation.Header,
+        Description = "Please insert JWT with Bearer into field",
+        Name = "Authorization",
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer",
+        BearerFormat = "JWT"
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer",
+                }
+            },
+            []
+        }
+    });
+});
+builder.Services.AddControllers();
+builder.Services.AddSignalR();
+
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<IByBitService, ByBitService>();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
-
+app.UseHsts();
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+app.UseResponseCompression();
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.UseAuthentication();
+app.UseAuthorization();
 
-app.MapGet("/weatherforecast", () =>
+app.MapControllers();
+app.MapHub<CostHub>("/cost");
+
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
+    c.DisplayRequestDuration();
+    c.DocExpansion(DocExpansion.None);
+});
+
+
+using (var scope = app.Services.CreateScope())
+{
+    var byBitSvc = scope.ServiceProvider.GetService<IByBitService>();
+    var costHub = scope.ServiceProvider.GetService<IHubContext<CostHub>>();
+    var query = ByBitQuery.Create(["tickers.HAEDALUSDT", "tickers.POPCATUSDT"]);
+    await byBitSvc!.StartAsync(query);
+    byBitSvc.ChangeProgress += cost =>
     {
-        var forecast = Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                (
-                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    Random.Shared.Next(-20, 55),
-                    summaries[Random.Shared.Next(summaries.Length)]
-                ))
-            .ToArray();
-        return forecast;
-    })
-    .WithName("GetWeatherForecast");
+        try
+        {
+            costHub!.Clients.All.SendAsync("onchange", JsonSerializer.Serialize(new
+            {
+                topic = cost.Topic,
+                price = cost.Data?.LastPrice
+            }));
+        }
+        catch
+        {
+            // ignored
+        }
+    };
+}
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
