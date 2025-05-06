@@ -22,25 +22,25 @@ public class ByBitService : IByBitService
 
     public ByBitService(IConfiguration configuration)
     {
-        this._apiKey = configuration["ByBitApi:ApiKey"]!;
-        this._apiSecret = configuration["ByBitApi:ApiSecret"]!;
-        this.Create();
+        this._apiKey = configuration.GetValue<string>("ByBitApi:ApiKey")!;
+        this._apiSecret = configuration.GetValue<string>("ByBitApi:ApiSecret")!;
+        this._webSocket = this.Create();
     }
 
-    private void Create()
+    private WebsocketClient Create()
     {
         var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
         var url = new Uri("wss://stream.bybit.com/v5/public/spot");
-        this._webSocket = new WebsocketClient(url)
+        var websocketClient = new WebsocketClient(url)
         {
             ReconnectTimeout = TimeSpan.FromSeconds(10)
         };
-        this._webSocket.ReconnectionHappened.Subscribe(_ =>
+        websocketClient.ReconnectionHappened.Subscribe(_ =>
         {
             if (_lastQuery != null)
                 this._webSocket.Send(JsonSerializer.Serialize(_lastQuery));
         });
-        this._webSocket.MessageReceived
+        websocketClient.MessageReceived
             .Where(msg => !string.IsNullOrWhiteSpace(msg.Text))
             .Subscribe(msg =>
             {
@@ -53,6 +53,7 @@ public class ByBitService : IByBitService
                     // ignored
                 }
             });
+        return websocketClient;
     }
 
     public async Task CheckIsStarted()
@@ -86,7 +87,7 @@ public class ByBitService : IByBitService
     private void Stop()
     {
         this._webSocket.Dispose();
-        this.Create();
+        this._webSocket = this.Create();
     }
 
     private RestRequest GetRequest(string url, Method method = Method.Get,
