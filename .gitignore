@@ -348,3 +348,4 @@ ASALocalRun/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+/Src/WebApi/appsettings.Production.json
