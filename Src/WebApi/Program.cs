@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using ByBitApi.Interface;
 using ByBitApi.Models;
@@ -13,6 +14,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using Swashbuckle.AspNetCore.SwaggerUI;
+using TelegramApi.Interface;
+using TelegramApi.Service;
+using WebApi.Background;
 using WebApi.Hubs;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -95,8 +99,14 @@ builder.Services.AddSwaggerGen(c =>
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
 
+builder.Services.AddDistributedMemoryCache();
+
+builder.Services.AddScoped<ICacheRepository, CacheRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IByBitService, ByBitService>();
+builder.Services.AddScoped<ITelegramService, TelegramService>();
+
+builder.Services.AddHostedService<PingChecker>();
 
 var app = builder.Build();
 
@@ -124,18 +134,36 @@ app.UseSwaggerUI(c =>
 using (var scope = app.Services.CreateScope())
 {
     var byBitSvc = scope.ServiceProvider.GetService<IByBitService>();
+    var telegramSvc = scope.ServiceProvider.GetService<ITelegramService>();
+    var cacheRepo = scope.ServiceProvider.GetService<ICacheRepository>();
     var costHub = scope.ServiceProvider.GetService<IHubContext<CostHub>>();
     var query = ByBitQuery.Create(["tickers.HAEDALUSDT", "tickers.POPCATUSDT"]);
+    var minMaxList = new List<ByBitMinMaxSpot>
+    {
+        new("tickers.HAEDALUSDT", 0.155, 0.175),
+        new("tickers.POPCATUSDT", 0.37, 0.396)
+    };
     await byBitSvc!.StartAsync(query);
-    byBitSvc.ChangeProgress += cost =>
+    byBitSvc.ChangeProgress += async cost =>
     {
         try
         {
-            costHub!.Clients.All.SendAsync("onchange", JsonSerializer.Serialize(new
+            Console.WriteLine($"{cost.Topic}:{cost.Data?.LastPrice}");
+            if (cost.Topic is null || cost.Data?.LastPrice is null) return;
+            _ = costHub!.Clients.All.SendAsync("onchange", JsonSerializer.Serialize(new
             {
                 topic = cost.Topic,
                 price = cost.Data?.LastPrice
             }));
+            var minMax = minMaxList.FirstOrDefault(x => x.Topic == cost.Topic);
+            if (minMax is null) return;
+            var currentPrice = Convert.ToDouble(cost.Data?.LastPrice, CultureInfo.InvariantCulture);
+            if (currentPrice < minMax.PriceMin || currentPrice > minMax.PriceMax)
+            {
+                if (await cacheRepo!.AnyCoinNotification(cost.Topic)) return;
+                _ = telegramSvc!.SendMessage(cost.Topic, cost.Data?.LastPrice);
+                _ = cacheRepo.SetCoinNotification(cost.Topic);
+            }
         }
         catch
         {

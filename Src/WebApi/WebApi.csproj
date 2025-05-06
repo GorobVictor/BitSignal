@@ -23,6 +23,12 @@
     <ItemGroup>
       <ProjectReference Include="..\ByBitApi\ByBitApi.csproj" />
       <ProjectReference Include="..\Infrastructure\Infrastructure.csproj" />
+      <ProjectReference Include="..\TelegramApi\TelegramApi.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Remove="Properties\PublishProfiles\hu9aml.realhost-free.pubxml" />
+      <None Remove="Properties\PublishProfiles\0jwecd.realhost-free.net - Web Deploy.pubxml" />
     </ItemGroup>
 
 </Project>
